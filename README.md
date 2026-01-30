@@ -97,3 +97,12 @@ The dataset comes from the **Behavioral Risk Factor Surveillance System (BRFSS),
 1. Clone the repository:  
 ```bash
 git clone https://github.com/emma-ruiz-serrano/heart-disease-prediction.git
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+
+3. Run the script:
+```bash
+python heart_disease_prediction.py
+
