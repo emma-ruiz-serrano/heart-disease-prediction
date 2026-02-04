@@ -1,0 +1,695 @@
+---
+title: "Heart Disease Prediction"
+author: "Emma Ruiz Serrano"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: flatly
+---
+
+# HEART DISEASE PREDICTION
+
+## 1. Introduction
+
+Cardiovascular diseases are among the leading causes of death worldwide.\
+This project focuses on predicting **heart disease** using demographic, lifestyle, and clinical variables.
+
+The main objectives are:
+
+-   Compare multiple machine learning models
+
+-   Address **class imbalance**
+
+-   Perform **feature engineering and selection**
+
+-   Evaluate models using **confusion matrices, ROC curves, and AUC**
+
+## 2. Data Preparation
+
+### 2.1 Packages
+
+```{r, message=FALSE, warning=FALSE}
+
+packages <- c(
+  "tidyverse", "rsample", "performance", "olsrr",
+  "corrr", "corrplot", "skimr",
+  "fastDummies", "ROSE", "glmnet", "caret",
+  "randomForest", "e1071", "pROC", "xgboost", "class"
+)
+
+
+installed <- packages %in% rownames(installed.packages())
+if (any(!installed)) {
+  install.packages(packages[!installed])
+}
+
+invisible(lapply(packages, library, character.only = TRUE))
+
+
+library(caTools)
+library(randomForest)
+library(e1071)  # for SVM
+library(caret)  # for evaluation and metrics
+library(pROC)   # for ROC y AUC
+library(xgboost) # for Gradient Boosting
+library(class)  # for KNN
+
+library(caret)
+library(glmnet)
+
+set.seed(123)
+
+library(pROC)
+library(ggplot2)
+```
+
+#### 2.2 Load and inspect the dataset
+
+```{r}
+data_raw <- read_csv("Heart_disease.csv")
+
+
+# Preview the data
+glimpse(data_raw)
+summary(data_raw)
+
+```
+
+#### 2.3 Data Inspection
+
+```{r}
+dim(data_raw)
+colSums(is.na(data_raw))
+
+```
+
+-   The dataset contains **no missing values**.
+
+-   Several categorical variables require encoding.
+
+## 3. Feature Engineering
+
+### 3.1 Dummy Variables (Binary Features)
+
+```{r}
+data <- data_raw |>
+  fastDummies::dummy_cols(
+    select_columns = c(
+      "Exercise", "Heart_Disease", "Skin_Cancer",
+      "Other_Cancer", "Depression", "Diabetes",
+      "Arthritis", "Smoking_History", "Sex"
+    ),
+    remove_first_dummy = TRUE
+  ) |>
+  select(-Exercise, -Heart_Disease, -Skin_Cancer,
+         -Other_Cancer, -Depression, -Diabetes,
+         -Arthritis, -Smoking_History, -Sex)
+```
+
+### 3.2 Ordinal Encoding
+
+General Health:
+
+```{r}
+# General Health (higher = better health)
+
+data$General_Health <- factor(data$General_Health,
+                         levels = c("Excellent", 
+                                    "Very Good", 
+                                    "Good", 
+                                    "Fair", 
+                                    "Poor"),
+                         labels= c(5,4,3,2,1))
+```
+
+CheckUp:
+
+```{r}
+# Last medical checkup (higher = more recent)
+
+data$Checkup <- factor(data$Checkup,
+                         levels = c("Within the past year", 
+                                    "Within the past 2 years", 
+                                    "Within the past 5 years", 
+                                    "5 or more years ago", 
+                                    "Never"),
+                         labels= c(5,4,3,2,1))
+```
+
+### 3.3 Age Conversion
+
+```{r}
+# Convert age ranges into numeric values (midpoints)
+
+data$Age_numeric <- case_when(
+  data$Age_Category == "18-24" ~ 21,
+  data$Age_Category == "25-29" ~ 27,
+  data$Age_Category == "30-34" ~ 32,
+  data$Age_Category == "35-39" ~ 37,
+  data$Age_Category == "40-44" ~ 42,
+  data$Age_Category == "45-49" ~ 47,
+  data$Age_Category == "50-54" ~ 52,
+  data$Age_Category == "55-59" ~ 57,
+  data$Age_Category == "60-64" ~ 62,
+  data$Age_Category == "65-69" ~ 67,
+  data$Age_Category == "70-74" ~ 72,
+  data$Age_Category == "75-79" ~ 77,
+  data$Age_Category == "80+" ~ 85,
+  TRUE ~ NA_real_ 
+)
+
+# Remove the variable Age_Category from the dataset
+data <- data |> select(-Age_Category)
+```
+
+## 4. Rename variables
+
+```{r}
+# Rename variables for clarity and consistency
+
+colnames(data) <- c(
+  "General_Health",
+  "Last_checkup",
+  "Height_cm",
+  "Weight_kg",
+  "BMI",
+  "Alcohol_Consumption",
+  "Fruit_Consumption",
+  "Green_Vegetables_Consumption",
+  "FriedPotato_Consumption",
+  "Exercise",
+  "Heart_Disease",
+  "Skin_Cancer",
+  "Other_Cancer",
+  "Depression",
+  "Pre_Diabetes",
+  "Diabetes",
+  "Diabetes_Pregnancy",
+  "Arthritis",
+  "Smoking_History",
+  "Sex_Male",
+  "Age_numeric"
+)
+```
+
+## 5. Correlation analysis
+
+Before computing correlations, all variables must be numeric.
+Previously encoded ordinal variables are therefore converted from factors to numeric values.
+
+```{r, correlation-prep, include=FALSE}
+# We convert the factor variables to numeric in order to perform the correlation analysis.
+data$General_Health <- as.numeric(as.character(data$General_Health))
+
+data$Last_checkup <- as.numeric(as.character(data$Last_checkup))
+```
+
+Correlation with the target variable:
+
+```{r}
+#We calculate the correlation matrix  and then focus on the correlations between all variables and "Heart_Disease" to identify the most relevant predictors.
+
+data |> 
+  correlate() |> 
+  corrr:: focus("Heart_Disease")
+```
+
+The correlation analysis indicates that most predictors have **weak individual linear relationships** with *Heart_Disease*. The strongest associations are observed for **General_Health** (−0.23) and **Age** (0.23), highlighting poorer self-reported health and older age as relevant risk factors.
+
+Medical conditions such as **Diabetes**, **Arthritis**, and **Smoking History** show moderate positive correlations, consistent with existing clinical evidence. In contrast, lifestyle, dietary, and anthropometric variables display very low correlations, suggesting that their effects are likely **non-linear or mediated by other factors**.
+
+Overall, these results support the use of **multivariate and non-linear models** to capture combined and interaction effects among predictors.
+
+Correlation heat map:
+
+```{r}
+library(corrplot)
+
+cor_matrix <- data |> cor()
+
+#save it as a png 
+png("matriz_correlaciones.png", width = 800, height = 600)
+
+corrplot::corrplot(
+  cor_matrix,
+  method = "color",                                    
+  tl.col = "black",                                   
+  tl.cex = 0.3,                                      
+  tl.srt = 90,                                       
+  number.cex = 0.8,                                  
+  title = "Correlation Matrix",                       
+  title.cex = 1.5                                     
+)
+
+dev.off()
+```
+
+![](images/clipboard-1643841918.png)
+
+The correlation heatmap visually summarizes the same relationships observed in the previous correlation analysis. It confirms that **most variables exhibit weak linear correlations** with *Heart_Disease*, while highlighting stronger associations for variables such as **Age** and \**General_Health*. The heatmap also helps identify patterns and dependencies among predictors, supporting the need for multivariate modeling.
+
+## 6. Train-test Split
+
+The dataset is split into training (80%) and testing (20%) sets.
+
+```{r}
+set.seed(12345)
+prop_train <- 0.8
+prop_test <- 1 - prop_train
+data_split <- initial_split(data, prop = prop_train)
+train <- training(data_split)
+test <- testing(data_split)
+```
+
+## 7. Handling Class Imbalance
+
+```{r}
+#We verify the proportions in the original dataset.
+
+table(train$Heart_Disease)
+prop.table(table(train$Heart_Disease))
+
+```
+
+We have approximately 92% negative cases and only 8% positive cases. This imbalance makes it challenging for our model to learn to predict the minority class, so we will perform undersampling of the majority class and train our models with fewer negative cases.
+
+To mitigate this issue, we apply **undersampling** using the ROSE package:
+
+```{r}
+# Apply undersampling with ROSE
+library(ROSE)
+train_balanced <- ovun.sample(Heart_Disease ~ ., data = train, method = "under", N = sum(train$Heart_Disease == 1) * 2)$data
+
+# Verify balance after undersampling
+table(train_balanced$Heart_Disease)
+```
+
+## 8. Feature Selection
+
+### 8.1 Ridge Regression
+
+Ridge does not eliminate variables, but rather reduces their coefficients. This means that all variables will remain in the model, but some will have a smaller impact.
+
+```{r}
+# RIDGE
+library(glmnet)
+
+X <- model.matrix(Heart_Disease ~ ., data = train_balanced)[, -1]  
+y <- as.factor(train_balanced$Heart_Disease) #target variable has to be a factor
+
+ridge_model <- glmnet(X, y, alpha = 0, family = "binomial")
+
+# Use cross validation to choose the best lambda
+set.seed(123)  
+cv_ridge <- cv.glmnet(X, y, alpha = 0, family = "binomial")
+
+# Display the cross-validation curve
+plot(cv_ridge)
+
+# Best lambda value
+best_lambda_ridge <- cv_ridge$lambda.min
+cat("Mejor valor de lambda para Ridge:", best_lambda_ridge, "\n")
+
+# Get coefficients with the best lambda
+ridge_coef <- coef(cv_ridge, s = "lambda.min")  
+print(ridge_coef)
+
+## Filter only selected variables
+selected_variables_ridge <- ridge_coef[ridge_coef != 0]
+print(selected_variables_ridge)
+```
+
+Fruit_consumption y FriedPotato_Consumption are the ones with lowest values
+
+### 8.2 Lasso Regression
+
+Lasso regression performs **automatic variable selection** by shrinking some coefficients exactly to zero.
+
+```{r}
+library(glmnet)
+
+X <- model.matrix(Heart_Disease ~ ., data = train_balanced)[, -1]  
+y <- as.factor(train_balanced$Heart_Disease)  
+
+lasso_model <- glmnet(X, y, alpha = 1, family = "binomial")
+
+set.seed(123)  
+cv_lasso <- cv.glmnet(X, y, alpha = 1, family = "binomial")
+
+plot(cv_lasso)
+
+best_lambda <- cv_lasso$lambda.min
+cat("Mejor valor de lambda:", best_lambda, "\n")
+
+lasso_coef <- coef(cv_lasso, s = "lambda.min")  
+print(lasso_coef)
+
+selected_variables <- lasso_coef[lasso_coef != 0]
+print(selected_variables)
+
+```
+
+Based on Lasso results, variables with zero coefficients were removed from subsequent models:
+
+The General_Health and Last_Checkout variables appear as 4 different variables each because using model.matrix() creates 4 dummy variables. This is because R uses an encoding approach in which one of the levels is omitted for reference. We avoid the collinearity problem too.
+
+Fruit_Consumption and BMI have a point (.) instead of a number. This indicates that Lasso has reduced those coefficients to zero, meaning that these variables are not relevant to predicting heart disease in this model. We eliminate these variables
+
+```{r}
+
+library(dplyr)
+
+train_balanced <- train_balanced |> 
+  select(-FriedPotato_Consumption)
+
+test <- test |> 
+  select(-FriedPotato_Consumption)
+```
+
+## 9. Modeling Strategy
+
+We address a **binary classification problem** using the following models:
+
+-   Logistic Regression (with interactions)
+-   Random Forest
+-   Gradient Boosting (XGBoost)
+-   Support Vector Machine (SVM)
+-   K-Nearest Neighbors (KNN)
+
+All models are evaluated using:
+
+-   Confusion Matrix
+-   ROC Curve
+-   AUC
+
+```{r}
+
+```
+
+To make classification models, the target variable has to be of factor type, since it is not, we transform it
+
+```{r}
+train_balanced$Heart_Disease <- factor(train_balanced$Heart_Disease, levels = c(0, 1))
+
+
+str(train_balanced$Heart_Disease)
+
+```
+
+### 9.1 Target Variable Formatting
+
+We change it both in train and in test. We have not been able to do it before because to make the correlations the variable had to be numerical, not factor.
+
+```{r}
+# Convert the variable to a factor keeping 0 and 1 as levels
+test$Heart_Disease <- factor(test$Heart_Disease, levels = c(0, 1))
+
+str(test$Heart_Disease)
+levels(test$Heart_Disease)
+
+```
+
+## 11. Logistic Regression
+
+We trained a logistic regression model with cross validation. After modifying the threshold to see which gave better results, we were left with the threshold of 0.5
+
+we have used:
+
+-   hyperparameter optimization
+
+-   cross-validated training
+
+-   try different thresholds
+
+-   rebalancing of classes (with the same proportions)
+
+Interactions are included to capture non-linear relationships.
+
+```{r}
+
+# We add the interactions in the model
+formula_interactions <- Heart_Disease ~ . + 
+  Height_cm:Weight_kg + Arthritis:Diabetes
+
+train_control <- trainControl(method = "cv", number = 10)
+
+# Train the logistic regression model with interactions and cross validation
+log_model_cv <- train(formula_interactions, data = train_balanced, method = "glm", 
+                      family = "binomial", trControl = train_control)
+
+print(log_model_cv)
+
+# Predict on test set
+log_pred <- predict(log_model_cv, newdata = test, type = "prob")[, 2]  
+
+#clasification with thresold
+umbral <- 0.5  
+log_pred_class <- ifelse(log_pred > umbral, 1, 0)
+
+# Convert classes to factors for the confusion matrix
+log_pred_class <- factor(log_pred_class, levels = c(0, 1))
+test$Heart_Disease <- factor(test$Heart_Disease, levels = c(0, 1))
+
+#confusion matrix
+cm_log <- confusionMatrix(log_pred_class, test$Heart_Disease)
+print(cm_log)
+
+# ROC curve
+roc_logistic <- roc(as.numeric(test$Heart_Disease) - 1, log_pred)
+plot(roc_logistic, col = "blue", lwd = 2)
+abline(a = 0, b = 1, col = "gray", lty = 2)
+cat("\nAUC - Regresión Logística con Interacciones: ", auc(roc_logistic), "\n")
+
+```
+
+## 12. Random Forest
+
+```{r rf-evaluation}
+library(caret)
+set.seed(123)
+tuneGrid <- expand.grid(.mtry = c(1, 2, 3, 4, 5))
+
+rf_model <- train(Heart_Disease ~ ., data = train_balanced, method = "rf", 
+                  trControl = trainControl(method = "cv", number = 5),
+                  tuneGrid = tuneGrid)
+
+print(rf_model)
+
+```
+
+We measure the importance of each variable in the Random Forest model, measured through the MeanDecreaseGini metric. This metric indicates how much you reduce the prediction uncertainty (or impurity) in the model by using that particular variable. The higher the value, the greater the importance of the variable in the predictions.
+
+```{r}
+importance <- randomForest::importance(rf_model)
+print(importance)
+
+```
+
+Variables such as Diabetes_Pregnancy (23.76) and Skin_Cancer (229.75) are the least important compared to the others, suggesting that they have little impact on the prediction of heart disease, yet we did not eliminate them
+
+```{r}
+rf_model <- randomForest(Heart_Disease ~ ., data = train_balanced, mtry=3, ntree = 500, type = 'classification')
+
+# Predecir en el conjunto de prueba
+rf_pred <- predict(rf_model, newdata = test, type = "prob")[, 2]  # Probabilidades de la clase positiva
+
+rf_pred_class <- ifelse(rf_pred > 0.,3 1, 0)  
+```
+
+We evaluate the classification threshold:
+
+```{r}
+rf_pred <- predict(rf_model, newdata = test, type = "prob")[,2]  # Probabilidades de la clase positiva
+thresholds <- seq(0.1, 0.9, by = 0.1)
+
+for (t in thresholds) {
+  rf_pred_class <- ifelse(rf_pred > t, 1, 0)
+  cm_rf <- confusionMatrix(factor(rf_pred_class, levels = c(0, 1)), test$Heart_Disease)
+  cat("\nUmbral:", t, "\n")
+  print(cm_rf)
+}
+```
+
+We leave the threshold at 0.5
+
+Evaluation:
+
+```{r}
+# Make sure classes are factors
+rf_pred_class <- factor(rf_pred_class, levels = c(0, 1))
+test$Heart_Disease <- factor(test$Heart_Disease, levels = c(0, 1))
+
+# Evaluate the model with confusion matrix
+cat("\nEvaluación - Random Forest\n")
+cm_rf <- confusionMatrix(rf_pred_class, test$Heart_Disease)
+print(cm_rf)
+
+# Generate ROC Curve and calculate AUC
+roc_rf <- roc(as.numeric(test$Heart_Disease), rf_pred)
+
+plot(roc_rf, col = "red", lwd = 2, main = "Curva ROC - Random Forest")
+abline(a = 0, b = 1, col = "gray", lty = 2)  
+
+cat("\nAUC - Random Forest: ", auc(roc_rf), "\n")
+
+```
+
+## 13. Gradient Boosting
+
+```{r}
+# Convert the data to array format, since xgboost works with arrays
+train_matrix <- as.matrix(train_balanced[, -which(names(train_balanced) == "Heart_Disease")])
+test_matrix <- as.matrix(test[, -which(names(test) == "Heart_Disease")])
+
+# Make sure labels only contain values 0 and 1
+train_labels <- as.numeric(as.factor(train_balanced$Heart_Disease)) - 1  
+test_labels <- as.numeric(as.factor(test$Heart_Disease)) - 1
+
+train_dmatrix <- xgb.DMatrix(data = train_matrix, label = train_labels)
+
+xgb_model <- xgboost(data = train_dmatrix, label = train_labels, 
+                      nrounds = 100, objective = "binary:logistic", 
+                      eval_metric = "logloss", verbose = 0)
+
+xgb_pred <- predict(xgb_model, test_matrix)
+xgb_pred_class <- ifelse(xgb_pred > 0.5, 1, 0)  
+
+```
+
+Evaluation:
+
+```{r}
+xgb_pred_class <- factor(xgb_pred_class, levels = c(0, 1))
+
+
+#1. Evaluate the model with confusion matrix
+cat("\nEvaluación - XGBoost\n")
+cm_xgb <- confusionMatrix(xgb_pred_class, test$Heart_Disease)
+print(cm_xgb)
+
+roc_xgb <- roc(as.numeric(test$Heart_Disease), xgb_pred)
+
+plot(roc_xgb, col = "green", lwd = 2, main = "Curva ROC - XGBoost")
+abline(a = 0, b = 1, col = "gray", lty = 2)  
+cat("\nAUC - XGBoost: ", auc(roc_xgb), "\n")
+
+```
+
+## 14. Support Vector Machine (SVM)
+
+```{r}
+# Train SVM model
+svm_model <- svm(Heart_Disease ~ ., data = train_balanced, probability = TRUE)
+
+# Predict on test set
+svm_pred <- predict(svm_model, newdata = test, probability = TRUE)
+```
+
+Evaluation:
+
+```{r}
+# We make sure that the predictions are numerical and in the appropriate range
+svm_pred_prob <- attr(svm_pred, "probabilities")[, 2]  
+# Probabilities for class 1
+svm_pred_class <- ifelse(svm_pred_prob > 0.5, 1, 0)  
+# Adjust the threshold as necessary
+
+# We make sure that predictions and actual labels are factors
+svm_pred_class <- factor(svm_pred_class, levels = c(0, 1))
+test$Heart_Disease <- factor(test$Heart_Disease, levels = c(0, 1))
+
+#1. Evaluate the model with confusion matrix
+cat("\nEvaluación - SVM\n")
+cm_svm <- confusionMatrix(svm_pred_class, test$Heart_Disease)
+print(cm_svm)
+
+#2. Generate ROC Curve and calculate AUC
+roc_svm <- roc(as.numeric(test$Heart_Disease) - 1, svm_pred_prob)
+
+#3. Graph the ROC Curve
+plot(roc_svm, col = "blue", lwd = 2, main = "Curva ROC - SVM")
+abline(a = 0, b = 1, col = "gray", lty = 2)  # Línea de referencia
+
+cat("\nAUC - SVM: ", auc(roc_svm), "\n")
+
+```
+
+## 15. KNN
+
+```{r}
+# Normalize data
+normalize <- function(x) { return ((x - min(x)) / (max(x) - min(x))) }
+train_data_norm <- as.data.frame(lapply(train_balanced[ , -which(names(train_balanced) == "Heart_Disease")], normalize))
+test_data_norm <- as.data.frame(lapply(test[ , -which(names(test) == "Heart_Disease")], normalize))
+
+# Train KNN model
+knn_pred <- knn(train = train_data_norm, test = test_data_norm, cl = train_balanced$Heart_Disease, k = 9)
+```
+
+Let's look for the best value of k:
+
+```{r}
+library(class)
+k_values <- seq(1, 20, by = 2)
+results <- sapply(k_values, function(k) {
+    pred <- knn(train = train_data_norm, test = test_data_norm, cl = train_balanced$Heart_Disease, k = k)
+    cm <- confusionMatrix(factor(pred, levels = c(0, 1)), test$Heart_Disease)
+    return(c(Sensitivity = cm$byClass["Sensitivity"], Specificity = cm$byClass["Specificity"]))
+})
+results <- t(results)
+print(results)
+
+```
+
+The results suggest that as you increase the K value, specificity improves, although sensitivity tends to decrease slightly. You should choose a value of k that strikes the balance you need between specificity and sensitivity. We stayed with k=9 as it maximizes specificity without sacrificing too much sensitivity.
+
+KNN Evaluation:
+
+```{r}
+library(pROC)
+library(caret)
+
+
+cat("\nEvaluación - KNN\n")
+cm_knn <- confusionMatrix(knn_pred, test$Heart_Disease)
+print(cm_knn)
+
+
+knn_pred_numeric <- as.numeric(knn_pred) - 1  
+roc_knn <- roc(as.numeric(test$Heart_Disease) - 1, knn_pred_numeric)
+
+plot(roc_knn, col = "blue", lwd = 2, main = "Curva ROC - KNN")
+abline(a = 0, b = 1, col = "gray", lty = 2)  
+
+cat("\nAUC - KNN: ", auc(roc_knn), "\n")
+```
+
+------------------------------------------------------------------------
+
+## 15. Model's Comparison:
+
+```{r}
+# Create a base chart with ROC curves
+roc_plot <- ggplot() +
+  geom_line(aes(x = 1 - roc_logistic$specificities, y = roc_logistic$sensitivities, color = "Logistic Regression"), size = 0.8) +
+  geom_line(aes(x = 1 - roc_rf$specificities, y = roc_rf$sensitivities, color = "Random Forest"), size = 0.8) +
+  geom_line(aes(x = 1 - roc_xgb$specificities, y = roc_xgb$sensitivities, color = "XGBoost"), size = 0.8) +
+  geom_line(aes(x = 1 - roc_svm$specificities, y = roc_svm$sensitivities, color = "SVM"), size = 0.8) +
+  geom_line(aes(x = 1 - roc_knn$specificities, y = roc_knn$sensitivities, color = "KNN"), size = 0.8) +
+  labs(title = "ROC Curves for All Models",
+       x = "1 - Specificity",
+       y = "Sensitivity",
+       color = "Model") +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.85, 0.2),  # Adjust position at bottom right corner
+    legend.text = element_text(size = 8),  # Reduce text size
+    legend.title = element_text(size = 9)
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray")
+
+print(roc_plot)
+
+```
